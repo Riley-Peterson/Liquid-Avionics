@@ -1,0 +1,35 @@
+### Altium ###
+# Previews Folders
+**/__Previews/
+
+# History Folders
+**/History/*
+
+# Project Logs
+Project Logs*/
+
+# Project Outputs
+Project Outputs*/
+
+# Auto-conversion notices
+*.PcbDoc.htm
+
+# Layout files
+*.WAS
+
+# Access lock file for dbLib sources
+**/*.ldb
+
+# Document Local Metadata
+*.metadata
+
+# Project hierarchy auto-generated file
+*.PrjPcbStructure
+*.PrjMbdStructure
+
+# Folder to save each comparison results
+CompareHistory/
+
+# Builds
+Debug/
+Release/
