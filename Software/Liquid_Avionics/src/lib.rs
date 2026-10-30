@@ -2,4 +2,5 @@
 #![no_std]
 
 pub mod board;
+pub mod can_map;
 pub mod drivers;
