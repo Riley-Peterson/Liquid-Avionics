@@ -3,6 +3,8 @@
 // Proprietary B range (0xFFxx), ID = (priority << 26) | (PGN << 8) | SA.
 // Payloads are little-endian, DLC 8, reserved bytes 0xFF.
 
+pub const BITRATE: u32 = 250_000;
+
 /// This board's source address (proposed in the doc, not yet confirmed).
 pub const SA_LIQUID_AV: u8 = 0x40;
 /// GSE source address. Commands from any other SA are ignored.

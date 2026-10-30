@@ -30,7 +30,7 @@ use embassy_stm32::usart::{self, Uart};
 use embassy_stm32::{bind_interrupts, dma, interrupt, pac, peripherals};
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use liquid_avionics::board;
+use liquid_avionics::{board, can_map};
 use liquid_avionics::drivers::lsm6dsv16bx::{self, AccelScale, GyroScale, Lsm6dsv16bx, Odr};
 use liquid_avionics::drivers::ms5611::{Ms5611, Osr};
 use liquid_avionics::drivers::w25q::{self, W25q};
@@ -38,8 +38,6 @@ use {defmt_rtt as _, panic_probe as _};
 
 /// Set false to skip switching the Camera 2 PROFET on during the test.
 const TEST_CAMERA2_OUTPUT: bool = true;
-/// CAN bit rate for the transmit test.
-const CAN_BITRATE: u32 = 250_000;
 /// Flash test region: last 4 KiB sector of the W25Q40.
 const FLASH_TEST_ADDR: u32 = 512 * 1024 - w25q::SECTOR_SIZE;
 
@@ -209,7 +207,7 @@ async fn probe_pin(pin: &mut Flex<'_>) -> (bool, bool) {
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
 	let hse_ok = board::probe_hse();
-	let mut p = embassy_stm32::init(board::clock_config(hse_ok));
+	let mut b = board::split(embassy_stm32::init(board::clock_config(hse_ok)));
 	let mut report = Report::new();
 	// Give probe-rs time to attach to RTT so the report header isn't dropped
 	// from the 1 KB log buffer.
@@ -236,21 +234,21 @@ async fn main(_spawner: Spawner) {
 	section("Idle pin levels");
 	{
 		// External pull-ups win against the ~40k internal pull-down.
-		let (_, scl) = probe_pin(&mut Flex::new(p.PB6.reborrow())).await;
-		let (_, sda) = probe_pin(&mut Flex::new(p.PB7.reborrow())).await;
+		let (_, scl) = probe_pin(&mut Flex::new(b.baro.scl.reborrow())).await;
+		let (_, sda) = probe_pin(&mut Flex::new(b.baro.sda.reborrow())).await;
 		info!("I2C1 SCL(PB6) w/ pulldown={} SDA(PB7) w/ pulldown={}", scl, sda);
 		report.check("I2C1 SCL pull-up (R1) present", scl);
 		report.check("I2C1 SDA pull-up (R2) present", sda);
 
-		let (_, imu_cs) = probe_pin(&mut Flex::new(p.PC10.reborrow())).await;
+		let (_, imu_cs) = probe_pin(&mut Flex::new(b.imu.cs.reborrow())).await;
 		report.check("IMU_CS pull-up (R19) present", imu_cs);
 
 		// IMU MISO (PA6) with the MCU pull-up, CS deasserted vs asserted.
 		// SDO is high-Z while CS is high, so a low reading there means MISO is
 		// held low by something other than an active, selected IMU.
 		{
-			let mut miso = Flex::new(p.PA6.reborrow());
-			let mut cs = Output::new(p.PC10.reborrow(), Level::High, Speed::Low);
+			let mut miso = Flex::new(b.imu.miso.reborrow());
+			let mut cs = Output::new(b.imu.cs.reborrow(), Level::High, Speed::Low);
 			miso.set_as_input(Pull::Up);
 			Timer::after_micros(200).await;
 			let cs_high = miso.is_high();
@@ -272,16 +270,16 @@ async fn main(_spawner: Spawner) {
 		// (Only valid from power-up: a successful SPI init disables I2C.)
 		{
 			// Self-test the bit-banger on the known-good MS5611 (PROM C1 high byte)
-			let mut bscl = Flex::new(p.PB6.reborrow());
-			let mut bsda = Flex::new(p.PB7.reborrow());
+			let mut bscl = Flex::new(b.baro.scl.reborrow());
+			let mut bsda = Flex::new(b.baro.sda.reborrow());
 			match bitbang_i2c_read_reg(&mut bscl, &mut bsda, board::MS5611_ADDR, 0xA2) {
 				Some(v) => info!("bit-bang I2C self-test on MS5611: ACK, PROM C1 high byte = 0x{:02x}", v),
 				None => warn!("bit-bang I2C self-test on MS5611: no ACK (IMU result below is not trustworthy)"),
 			}
 
-			let _cs = Output::new(p.PC10.reborrow(), Level::High, Speed::Low);
-			let mut scl = Flex::new(p.PA5.reborrow());
-			let mut sda = Flex::new(p.PA7.reborrow());
+			let _cs = Output::new(b.imu.cs.reborrow(), Level::High, Speed::Low);
+			let mut scl = Flex::new(b.imu.sck.reborrow());
+			let mut sda = Flex::new(b.imu.mosi.reborrow());
 			let mut found = None;
 			for addr in [0x6Bu8, 0x6A] {
 				if let Some(id) = bitbang_i2c_read_reg(&mut scl, &mut sda, addr, 0x0F) {
@@ -299,11 +297,11 @@ async fn main(_spawner: Spawner) {
 		}
 
 		// The CAN transceiver R pin drives high when the bus is recessive.
-		let (_, can_rx) = probe_pin(&mut Flex::new(p.PA11.reborrow())).await;
+		let (_, can_rx) = probe_pin(&mut Flex::new(b.can.rx.reborrow())).await;
 		report.check("CAN1_RX driven high by SN65HVD230 (transceiver powered, bus recessive)", can_rx);
 
 		// UART idle is high; only true if the RFD900 is powered and its TX reaches PC7.
-		let (_, uart_rx) = probe_pin(&mut Flex::new(p.PC7.reborrow())).await;
+		let (_, uart_rx) = probe_pin(&mut Flex::new(b.radio.rx.reborrow())).await;
 		if uart_rx {
 			report.record("USART6_RX (PC7) idles high - RFD900 TX line present", Status::Pass);
 		} else {
@@ -311,12 +309,12 @@ async fn main(_spawner: Spawner) {
 		}
 
 		// IMU INT pins are push-pull, driven low after power-on.
-		let (int1_up, _) = probe_pin(&mut Flex::new(p.PA15.reborrow())).await;
-		let (int2_up, _) = probe_pin(&mut Flex::new(p.PC11.reborrow())).await;
+		let (int1_up, _) = probe_pin(&mut Flex::new(b.imu.int1.reborrow())).await;
+		let (int2_up, _) = probe_pin(&mut Flex::new(b.imu.int2.reborrow())).await;
 		report.check("IMU_Int1 (PA15) driven low by IMU", !int1_up);
 		report.check("IMU_Int2 (PC11) driven low by IMU", !int2_up);
 
-		let sel = Input::new(p.PB2.reborrow(), board::SEL_PULL);
+		let sel = Input::new(b.sel.reborrow(), board::SEL_PULL);
 		Timer::after_micros(200).await;
 		if sel.is_high() {
 			report.record("SEL (PB2) open -> reads HIGH via internal pull-up", Status::Pass);
@@ -326,33 +324,32 @@ async fn main(_spawner: Spawner) {
 	}
 
 	// Hold camera 1 output low (PROFET desoldered) and camera 2 off.
-	let _cam1 = Output::new(p.PC13, Level::Low, Speed::Low);
-	let mut cam2 = Output::new(p.PA0, Level::Low, Speed::Low);
+	let _cam1 = Output::new(b.cameras.cam1_out, Level::Low, Speed::Low);
+	let mut cam2 = Output::new(b.cameras.cam2_out, Level::Low, Speed::Low);
 
 	// ------------------------------------------------------------ ADC
 	section("ADC");
-	let mut adc = Adc::new(p.ADC1);
+	let mut adc = Adc::new(b.adc);
 	let mut vrefint = adc.enable_vrefint();
 	let mut temp_ch = adc.enable_temperature();
 	Timer::after_micros(20).await;
 	let mut pt = [
-		("PT1", p.PC5.degrade_adc()),
-		("PT2", p.PC4.degrade_adc()),
-		("PT3", p.PB1.degrade_adc()),
-		("PT4", p.PB0.degrade_adc()),
+		("PT1", b.pt.pt1.degrade_adc()),
+		("PT2", b.pt.pt2.degrade_adc()),
+		("PT3", b.pt.pt3.degrade_adc()),
+		("PT4", b.pt.pt4.degrade_adc()),
 	];
-	let mut cam1_is = p.PA2.degrade_adc();
-	let mut cam2_is = p.PA1.degrade_adc();
+	let mut cam1_is = b.cameras.cam1_is.degrade_adc();
+	let mut cam2_is = b.cameras.cam2_is.degrade_adc();
 	let st = SampleTime::CYCLES480;
 
-	// Factory calibration values (RM0390 / DS10693), measured at VDDA = 3.3 V
-	let vrefint_cal = unsafe { core::ptr::read_volatile(0x1FFF_7A2A as *const u16) } as u32;
+	// Factory temp sensor calibration (RM0390 / DS10693), measured at VDDA = 3.3 V
 	let ts_cal1 = unsafe { core::ptr::read_volatile(0x1FFF_7A2C as *const u16) } as f32;
 	let ts_cal2 = unsafe { core::ptr::read_volatile(0x1FFF_7A2E as *const u16) } as f32;
 
 	let vref_raw = adc.blocking_read(&mut vrefint, st) as u32;
-	let vdda_mv = if vref_raw > 0 { 3300 * vrefint_cal / vref_raw } else { 0 };
-	info!("VREFINT raw={} cal={} -> VDDA = {} mV", vref_raw, vrefint_cal, vdda_mv);
+	let vdda_mv = board::vdda_mv(vref_raw, 1);
+	info!("VREFINT raw={} cal={} -> VDDA = {} mV", vref_raw, board::vrefint_cal(), vdda_mv);
 	report.check("VDDA within 3.2-3.4 V (3.3V LDO)", (3200..=3400).contains(&vdda_mv));
 
 	let to_mv = |raw: u16| raw as u32 * vdda_mv / 4095;
@@ -365,7 +362,7 @@ async fn main(_spawner: Spawner) {
 	for (name, ch) in pt.iter_mut() {
 		let raw = adc.blocking_read(ch, st);
 		let pin_mv = to_mv(raw);
-		let in_mv = pin_mv * board::PT_DIVIDER_NUM / board::PT_DIVIDER_DEN;
+		let in_mv = board::pt_input_mv(raw as u32, 1, vdda_mv);
 		info!("{}: raw={} pin={} mV -> input={} mV (assuming 10k/15k divider)", name, raw, pin_mv, in_mv);
 	}
 	let cam1_raw = adc.blocking_read(&mut cam1_is, st);
@@ -378,8 +375,8 @@ async fn main(_spawner: Spawner) {
 		let mut cfg = spi::Config::default();
 		cfg.frequency = Hertz(8_000_000);
 		cfg.mode = spi::MODE_0;
-		let bus = Spi::new(p.SPI2, p.PB10, p.PC1, p.PC2, p.DMA1_CH4, p.DMA1_CH3, Irqs, cfg);
-		let cs = Output::new(p.PC3, Level::High, Speed::VeryHigh);
+		let bus = Spi::new(b.flash.spi, b.flash.sck, b.flash.mosi, b.flash.miso, b.flash.tx_dma, b.flash.rx_dma, Irqs, cfg);
+		let cs = Output::new(b.flash.cs, Level::High, Speed::VeryHigh);
 		let dev = ExclusiveDevice::new(bus, cs, Delay).unwrap();
 		let mut flash = W25q::new(dev, 512 * 1024);
 		flash_test(&mut flash, &mut report).await;
@@ -390,13 +387,13 @@ async fn main(_spawner: Spawner) {
 	let mut spi1_cfg = spi::Config::default();
 	spi1_cfg.frequency = Hertz(8_000_000);
 	spi1_cfg.mode = spi::MODE_3;
-	let spi1 = Spi::new(p.SPI1, p.PA5, p.PA7, p.PA6, p.DMA2_CH3, p.DMA2_CH0, Irqs, spi1_cfg);
-	let imu_cs = Output::new(p.PC10, Level::High, Speed::VeryHigh);
+	let spi1 = Spi::new(b.imu.spi, b.imu.sck, b.imu.mosi, b.imu.miso, b.imu.tx_dma, b.imu.rx_dma, Irqs, spi1_cfg);
+	let imu_cs = Output::new(b.imu.cs, Level::High, Speed::VeryHigh);
 	let mut imu_dev = ExclusiveDevice::new(spi1, imu_cs, Delay).unwrap();
 	imu_spi_probe(&mut imu_dev, &spi1_cfg).await;
 	let mut imu = Lsm6dsv16bx::new(imu_dev);
-	let mut int1 = ExtiInput::new(p.PA15, p.EXTI15, Pull::Down, Irqs);
-	let mut int2 = ExtiInput::new(p.PC11, p.EXTI11, Pull::Down, Irqs);
+	let mut int1 = ExtiInput::new(b.imu.int1, b.imu.int1_exti, Pull::Down, Irqs);
+	let mut int2 = ExtiInput::new(b.imu.int2, b.imu.int2_exti, Pull::Down, Irqs);
 	let imu_ok = imu_test(&mut imu, &mut int1, &mut int2, &mut report).await;
 
 	// ------------------------------------------------------------ Baro
@@ -406,7 +403,7 @@ async fn main(_spawner: Spawner) {
 	i2c_cfg.timeout = Duration::from_millis(20);
 	// No bus scan: embassy 0.6's I2C v1 times out on address-only probes, and
 	// the MS5611 is the only device on this bus anyway.
-	let i2c = I2c::new(p.I2C1, p.PB6, p.PB7, p.DMA1_CH6, p.DMA1_CH0, Irqs, i2c_cfg);
+	let i2c = I2c::new(b.baro.i2c, b.baro.scl, b.baro.sda, b.baro.tx_dma, b.baro.rx_dma, Irqs, i2c_cfg);
 	let mut baro = Ms5611::new(i2c, board::MS5611_ADDR);
 	let baro_ok = baro_test(&mut baro, &mut report).await;
 
@@ -415,7 +412,7 @@ async fn main(_spawner: Spawner) {
 	{
 		let mut cfg = usart::Config::default();
 		cfg.baudrate = 57_600;
-		match Uart::new(p.USART6, p.PC7, p.PC6, p.DMA2_CH6, p.DMA2_CH1, Irqs, cfg) {
+		match Uart::new(b.radio.uart, b.radio.rx, b.radio.tx, b.radio.tx_dma, b.radio.rx_dma, Irqs, cfg) {
 			Ok(mut uart) => radio_test(&mut uart, &mut report).await,
 			Err(e) => {
 				error!("USART6 config error: {}", e);
@@ -427,7 +424,7 @@ async fn main(_spawner: Spawner) {
 	// ------------------------------------------------------------ CAN
 	section("CAN1 + SN65HVD230");
 	{
-		let mut can = Can::new(p.CAN1, p.PA11, p.PA12, Irqs);
+		let mut can = Can::new(b.can.can, b.can.rx, b.can.tx, Irqs);
 		can_test(&mut can, &mut report).await;
 	}
 
@@ -467,7 +464,7 @@ async fn main(_spawner: Spawner) {
 		}
 		let mut line = [0u32; 4];
 		for (i, (_, ch)) in pt.iter_mut().enumerate() {
-			line[i] = to_mv(adc.blocking_read(ch, st)) * board::PT_DIVIDER_NUM / board::PT_DIVIDER_DEN;
+			line[i] = board::pt_input_mv(adc.blocking_read(ch, st) as u32, 1, vdda_mv);
 		}
 		info!("PT input mV = {}", line);
 		Timer::after_secs(1).await;
@@ -756,7 +753,7 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 
 async fn can_test(can: &mut Can<'_>, report: &mut Report) {
 	can.modify_config()
-		.set_bitrate(CAN_BITRATE)
+		.set_bitrate(can_map::BITRATE)
 		.set_loopback(false)
 		.set_silent(false);
 	// One-shot transmit. Written directly because embassy-stm32 0.6.0's
