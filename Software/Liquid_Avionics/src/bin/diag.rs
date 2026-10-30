@@ -207,11 +207,9 @@ async fn probe_pin(pin: &mut Flex<'_>) -> (bool, bool) {
 // ---------------------------------------------------------------- main
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
 	let hse_ok = board::probe_hse();
 	let mut p = embassy_stm32::init(board::clock_config(hse_ok));
-	// Without this, probe-rs can't attach after a cold power-up (DP WAIT).
-	spawner.spawn(board::keep_awake().unwrap());
 	let mut report = Report::new();
 	// Give probe-rs time to attach to RTT so the report header isn't dropped
 	// from the 1 KB log buffer.

@@ -66,27 +66,3 @@ pub fn probe_hse() -> bool {
 	RCC.cr().modify(|w| w.set_hseon(false));
 	ready
 }
-
-/// Keeps the executor from ever sleeping (WFE) so the ST-Link can attach to
-/// running firmware. With the core idle in WFE, a fresh SWD connect fails with
-/// DP WAIT even though embassy sets DBGMCU_CR (DBG_SLEEP/STOP/STANDBY); a
-/// connection made while the core is busy survives later sleeps. Spawn this in
-/// any binary you want to attach to after a cold power-up.
-#[embassy_executor::task]
-pub async fn keep_awake() {
-	loop {
-		// Wake ourselves and return Pending once, so the executor always has
-		// work queued and never reaches its WFE.
-		let mut yielded = false;
-		core::future::poll_fn(|cx| {
-			if yielded {
-				core::task::Poll::Ready(())
-			} else {
-				yielded = true;
-				cx.waker().wake_by_ref();
-				core::task::Poll::Pending
-			}
-		})
-		.await;
-	}
-}

@@ -42,11 +42,9 @@ fn read_sum(adc: &mut Adc<'_, ADC1>, ch: &mut impl AdcChannel<ADC1>) -> u32 {
 }
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
 	let hse_ok = board::probe_hse();
 	let p = embassy_stm32::init(board::clock_config(hse_ok));
-	// Without this, probe-rs can't attach after a cold power-up (DP WAIT).
-	spawner.spawn(board::keep_awake().unwrap());
 	if !hse_ok {
 		warn!("HSE did not start, running on HSI");
 	}

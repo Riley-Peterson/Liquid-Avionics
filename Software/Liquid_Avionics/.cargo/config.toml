@@ -2,7 +2,7 @@
 target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
-runner = "probe-rs run --chip STM32F446RETx"
+runner = "probe-rs run --chip STM32F446RETx --connect-under-reset"
 rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=-Tdefmt.x",
