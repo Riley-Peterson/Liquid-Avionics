@@ -2,9 +2,15 @@
 name = "Liquid_Avionics"
 version = "0.1.0"
 edition = "2024"
+default-run = "flight"
 
 [lib]
 name = "liquid_avionics"
+
+# Flight software. diag and pt_can are picked up from src/bin/ automatically.
+[[bin]]
+name = "flight"
+path = "src/main.rs"
 
 [dependencies]
 cortex-m = { version = "0.7.10", features = ["critical-section-single-core"] }
